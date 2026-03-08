@@ -1,5 +1,7 @@
 #!/bin/bash
-# ...existing code...
+# Bunny DNS 管理脚本
+# 功能：通过 API 管理 Bunny DNS 区域和记录
+# API 文档: https://docs.bunny.net/api-reference/core/dns-zone/list-dns-zones
 
 # ==========================
 # 检查 curl & jq
@@ -91,9 +93,8 @@ get_json_field() {
 }
 
 # ==========================
-# IP / Name 校验函数（保持现有实现）
+# IP / Name 校验函数
 # ==========================
-# ...existing code...
 is_valid_ipv4() {
     local ip=$1
     [[ $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
@@ -112,7 +113,15 @@ is_valid_ipv6() {
 is_valid_name() {
     local name=$(echo "$1" | tr -d '\r' | xargs)
     [[ -z "$name" ]] && { echo "❌ 记录名不能为空"; return 1; }
-    [[ "$name" =~ ^[a-zA-Z0-9\-\_@]+$ ]] || { echo "❌ 记录名只能包含字母、数字、-、_ 或 @"; return 1; }
+    [[ "$name" =~ ^[a-zA-Z0-9\-\_@\*]+$ ]] || { echo "❌ 记录名只能包含字母、数字、-、_、@ 或 *"; return 1; }
+    return 0
+}
+
+is_valid_domain() {
+    local domain=$(echo "$1" | tr -d '\r' | xargs)
+    [[ -z "$domain" ]] && { echo "❌ 域名不能为空"; return 1; }
+    # 简单的域名验证
+    [[ "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]] || { echo "❌ 无效的域名格式"; return 1; }
     return 0
 }
 # ...existing code...
@@ -129,15 +138,25 @@ list_zones() {
         check_api_response "$resp" || return
     fi
 
-    echo "=== DNS 区域 ==="
+    if [[ -z "$body" ]] || [[ "$body" == "[]" ]]; then
+        echo "❌ 没有找到任何 DNS 区域"
+        return
+    fi
+
+    echo "=== DNS 区域列表 ==="
+    echo "$(printf '%-30s %s\n' '域名' 'Zone ID')"
+    echo "$(printf '%-30s %s\n' '-----' '-----')"
+    
     if [[ $USE_JQ -eq 1 ]]; then
-        echo "$body" | jq -r '.[] | "\(.Domain) (ID: \(.Id))"' 2>/dev/null || echo "❌ 解析结果失败"
+        echo "$body" | jq -r '.[] | "\(.Domain | ascii_downcase) \(.Id)"' 2>/dev/null | while read -r domain id; do
+            printf '%-30s %s\n' "$domain" "$id"
+        done || echo "❌ 解析结果失败"
     else
-        # 兼容旧解析方式（按对象分割）
+        # 兼容旧解析方式
         echo "$body" | tr '{' '\n' | while read -r line; do
             id=$(echo "$line" | grep -o "\"Id\"[[:space:]]*:[^,}]*" | sed 's/"Id"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
             domain=$(echo "$line" | grep -o "\"Domain\"[[:space:]]*:[^,}]*" | sed 's/"Domain"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
-            [[ -n "$id" && -n "$domain" ]] && echo "$domain (ID: $id)"
+            [[ -n "$id" && -n "$domain" ]] && printf '%-30s %s\n' "${domain,,}" "$id"
         done
     fi
 }
@@ -145,15 +164,33 @@ list_zones() {
 add_zone() {
     read -p "请输入要添加的域名: " domain
     domain=$(echo "$domain" | tr -d '\r' | xargs)
-    [[ -z "$domain" ]] && echo "❌ 域名不能为空" && return
+    
+    is_valid_domain "$domain" || return
+    
+    echo "正在添加域名 $domain..."
     resp=$(api_request POST "/dnszone" "{\"Domain\":\"$domain\"}")
-    check_api_response "$resp"
+    
+    if check_api_response "$resp"; then
+        local body=$(echo "$resp" | sed '$d' | tr -d '\r')
+        if [[ $USE_JQ -eq 1 ]]; then
+            local zone_id=$(echo "$body" | jq -r '.Id // empty' 2>/dev/null)
+        else
+            local zone_id=$(echo "$body" | grep -o "\"Id\"[[:space:]]*:[^,}]*" | sed 's/"Id"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//' | head -1)
+        fi
+        [[ -n "$zone_id" ]] && echo "✅ 区域已创建，Zone ID: $zone_id"
+    fi
 }
 
 delete_zone() {
     read -p "请输入要删除的 Zone ID: " zone_id
-    read -p "确认删除 Zone $zone_id? (y/n): " confirm
-    [[ "$confirm" != "y" ]] && echo "❌ 操作取消" && return
+    zone_id=$(echo "$zone_id" | tr -d '\r' | xargs)
+    [[ -z "$zone_id" ]] && echo "❌ Zone ID 不能为空" && return
+    
+    echo "⚠️ 警告：删除区域将删除其中的所有 DNS 记录！"
+    read -p "确认删除 Zone $zone_id? (输入 'yes' 确认): " confirm
+    [[ "$confirm" != "yes" ]] && echo "❌ 操作取消" && return
+    
+    echo "正在删除 Zone $zone_id..."
     resp=$(api_request DELETE "/dnszone/$zone_id")
     check_api_response "$resp"
 }
@@ -162,56 +199,79 @@ delete_zone() {
 # 记录管理（list 使用 jq 或回退解析）
 # ==========================
 add_record() {
-    # ...existing code...
     local zone_id=$1
-    echo "可选记录类型: A, AAAA, CNAME, MX, TXT, NS, Redirect"
+    [[ -z "$zone_id" ]] && echo "❌ Zone ID 缺失" && return
+    
+    echo
+    echo "=== 添加 DNS 记录 ==="
+    echo "支持的记录类型: A, AAAA, CNAME, MX, TXT, NS, SRV, CAA"
     read -p "请输入记录类型: " type
     type=$(echo "$type" | tr '[:lower:]' '[:upper:]')
-    read -p "请输入记录名 (www 或 @): " name
+    
+    read -p "请输入记录名 (@, www 或其他子域): " name
     name=$(echo "$name" | tr -d '\r' | xargs)
     is_valid_name "$name" || return
+    
     read -p "请输入记录值: " value
     value=$(echo "$value" | tr -d '\r' | xargs)
-    read -p "请输入 TTL (默认 300): " ttl
-    ttl=${ttl:-300}
+    [[ -z "$value" ]] && echo "❌ 记录值不能为空" && return
+    
+    read -p "请输入 TTL (默认 3600): " ttl
+    ttl=${ttl:-3600}
+    
+    # 验证 TTL 是否为数字
+    [[ ! "$ttl" =~ ^[0-9]+$ ]] && echo "❌ TTL 必须是数字" && return
 
-    declare -A type_map=([A]=1 [AAAA]=28 [CNAME]=5 [MX]=15 [TXT]=16 [NS]=2 [REDIRECT]=301)
+    declare -A type_map=([A]=1 [AAAA]=28 [CNAME]=5 [MX]=15 [TXT]=16 [NS]=2 [SRV]=33 [CAA]=257 [REDIRECT]=301)
     type_num=${type_map[$type]}
     [[ -z "$type_num" ]] && { echo "❌ 类型无效"; return; }
 
+    # IP 地址验证
     if [[ "$type" == "A" ]]; then
         is_valid_ipv4 "$value" || { echo "❌ IPv4 地址不合法"; return; }
     elif [[ "$type" == "AAAA" ]]; then
         is_valid_ipv6 "$value" || { echo "❌ IPv6 地址不合法"; return; }
     fi
 
+    # 特殊字段（如 MX 的优先级）
     if [[ "$type" == "MX" ]]; then
-        read -p "请输入优先级 (默认 10): " priority
+        read -p "请输入 MX 优先级 (默认 10): " priority
         priority=${priority:-10}
+        [[ ! "$priority" =~ ^[0-9]+$ ]] && echo "❌ 优先级必须是数字" && return
         data="{\"Type\":$type_num,\"Name\":\"$name\",\"Value\":\"$value\",\"Ttl\":$ttl,\"Priority\":$priority}"
     else
         data="{\"Type\":$type_num,\"Name\":\"$name\",\"Value\":\"$value\",\"Ttl\":$ttl}"
     fi
 
+    echo "正在添加记录..."
     resp=$(api_request PUT "/dnszone/$zone_id/records" "$data")
     check_api_response "$resp"
 }
 
 update_record() {
-    # ...existing code...
     local zone_id=$1
+    [[ -z "$zone_id" ]] && echo "❌ Zone ID 缺失" && return
+    
+    echo
+    echo "=== 更新 DNS 记录 ==="
     read -p "请输入记录 ID: " record_id
+    record_id=$(echo "$record_id" | tr -d '\r' | xargs)
+    [[ -z "$record_id" ]] && echo "❌ 记录 ID 不能为空" && return
+    
     read -p "请输入记录类型: " type
     type=$(echo "$type" | tr '[:lower:]' '[:upper:]')
-    read -p "请输入记录名 (www 或 @): " name
+    read -p "请输入记录名 (@, www 或其他子域): " name
     name=$(echo "$name" | tr -d '\r' | xargs)
     is_valid_name "$name" || return
     read -p "请输入新的记录值: " value
     value=$(echo "$value" | tr -d '\r' | xargs)
-    read -p "请输入 TTL (默认 300): " ttl
-    ttl=${ttl:-300}
+    [[ -z "$value" ]] && echo "❌ 记录值不能为空" && return
+    
+    read -p "请输入 TTL (默认 3600): " ttl
+    ttl=${ttl:-3600}
+    [[ ! "$ttl" =~ ^[0-9]+$ ]] && echo "❌ TTL 必须是数字" && return
 
-    declare -A type_map=([A]=1 [AAAA]=28 [CNAME]=5 [MX]=15 [TXT]=16 [NS]=2 [REDIRECT]=301)
+    declare -A type_map=([A]=1 [AAAA]=28 [CNAME]=5 [MX]=15 [TXT]=16 [NS]=2 [SRV]=33 [CAA]=257 [REDIRECT]=301)
     type_num=${type_map[$type]}
     [[ -z "$type_num" ]] && { echo "❌ 类型无效"; return; }
 
@@ -222,22 +282,31 @@ update_record() {
     fi
 
     if [[ "$type" == "MX" ]]; then
-        read -p "请输入优先级 (默认 10): " priority
+        read -p "请输入 MX 优先级 (默认 10): " priority
         priority=${priority:-10}
+        [[ ! "$priority" =~ ^[0-9]+$ ]] && echo "❌ 优先级必须是数字" && return
         data="{\"Type\":$type_num,\"Name\":\"$name\",\"Value\":\"$value\",\"Ttl\":$ttl,\"Priority\":$priority}"
     else
         data="{\"Type\":$type_num,\"Name\":\"$name\",\"Value\":\"$value\",\"Ttl\":$ttl}"
     fi
 
+    echo "正在更新记录..."
     resp=$(api_request POST "/dnszone/$zone_id/records/$record_id" "$data")
     check_api_response "$resp"
 }
 
 delete_record() {
     local zone_id=$1
-    read -p "请输入记录 ID: " record_id
-    read -p "确认删除记录 ID $record_id? (y/n): " confirm
-    [[ "$confirm" != "y" ]] && echo "❌ 操作取消" && return
+    [[ -z "$zone_id" ]] && echo "❌ Zone ID 缺失" && return
+    
+    read -p "请输入要删除的记录 ID: " record_id
+    record_id=$(echo "$record_id" | tr -d '\r' | xargs)
+    [[ -z "$record_id" ]] && echo "❌ 记录 ID 不能为空" && return
+    
+    read -p "确认删除记录 ID $record_id? (输入 'yes' 确认): " confirm
+    [[ "$confirm" != "yes" ]] && echo "❌ 操作取消" && return
+    
+    echo "正在删除记录..."
     resp=$(api_request DELETE "/dnszone/$zone_id/records/$record_id")
     check_api_response "$resp"
 }
@@ -252,25 +321,110 @@ list_records() {
         check_api_response "$resp" || return
     fi
 
-    echo "=== Records in Zone $zone_id ==="
+    echo ""
+    echo "=== Zone $zone_id 的 DNS 记录 ==="
+    echo "$(printf '%-8s %-5s %-20s %s\n' 'ID' 'Type' 'Name' 'Value | Data')"
+    echo "$(printf '%-8s %-5s %-20s %s\n' '----' '----' '----' '----')"
+    
     if [[ $USE_JQ -eq 1 ]]; then
-        echo "$body" | jq -r '.Records? // .[]? | if type=="object" then "\(.Id) \(.Type) \(.Name) -> \(.Value)" else tostring end' 2>/dev/null
+        echo "$body" | jq -r '.Records[]? // .[]? | select(type=="object") | "\(.Id) \(.Type) \(.Name // "@") \(.Value // .Data // "")"' 2>/dev/null | while read -r id type name value; do
+            printf '%-8s %-5s %-20s %s\n' "$id" "$type" "$name" "$value"
+        done || echo "❌ 解析记录失败"
     else
         echo "$body" | tr '{' '\n' | while read -r line; do
             rid=$(echo "$line" | grep -o "\"Id\"[[:space:]]*:[^,}]*" | sed 's/"Id"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
             type=$(echo "$line" | grep -o "\"Type\"[[:space:]]*:[^,}]*" | sed 's/"Type"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
             name=$(echo "$line" | grep -o "\"Name\"[[:space:]]*:[^,}]*" | sed 's/"Name"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
             value=$(echo "$line" | grep -o "\"Value\"[[:space:]]*:[^,}]*" | sed 's/"Value"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
-            [[ -n "$rid" && -n "$type" ]] && echo "Type $type | $name -> $value (ID: $rid)"
+            [[ -n "$rid" && -n "$type" ]] && printf '%-8s %-5s %-20s %s\n' "$rid" "$type" "${name:-@}" "$value"
         done
     fi
 }
 
-# ...existing code...
+# ==========================
+# Zone 管理菜单
+# ==========================
+zone_menu() {
+    read -p "请输入要管理的 Zone ID: " zone_id
+    zone_id=$(echo "$zone_id" | tr -d '\r' | xargs)
+    
+    if [[ -z "$zone_id" ]]; then
+        echo "❌ Zone ID 不能为空"
+        return
+    fi
+    
+    while true; do
+        echo
+        echo "=== Zone $zone_id 管理菜单 ==="
+        echo "1. 查看记录"
+        echo "2. 添加记录"
+        echo "3. 更新记录"
+        echo "4. 删除记录"
+        echo "0. 返回主菜单"
+        read -p "请选择操作: " choice
+        choice=$(echo "$choice" | tr -d '\r' | xargs)
+        
+        case "$choice" in
+            1) list_records "$zone_id" ;;
+            2) add_record "$zone_id" ;;
+            3) update_record "$zone_id" ;;
+            4) delete_record "$zone_id" ;;
+            0) break ;;
+            *) echo "❌ 无效输入" ;;
+        esac
+    done
+}
+
+# ==========================
+# 帮助信息
+# ==========================
+show_help() {
+    cat << 'EOF'
+=== Bunny DNS 管理脚本帮助 ===
+
+本脚本用于管理 Bunny DNS 服务的区域和记录。
+
+功能：
+  1. 查看 DNS 区域并管理记录 - 列出所有区域，选择区域后管理其记录
+  2. 添加 DNS 区域         - 为新域名创建 DNS 区域
+  3. 删除 DNS 区域         - 删除指定的 DNS 区域及其所有记录
+  4. 单独查看记录          - 直接查看特定 Zone ID 的所有记录
+  5. 单独添加记录          - 直接向特定 Zone ID 添加记录
+  6. 单独更新记录          - 直接修改特定 Zone ID 中的记录
+  7. 单独删除记录          - 直接删除特定 Zone ID 中的记录
+  h. 显示此帮助            - 显示帮助信息
+  0. 退出                 - 退出程序
+
+支持的 DNS 记录类型：
+  A       - IPv4 地址
+  AAAA    - IPv6 地址
+  CNAME   - 规范名记录
+  MX      - 邮件交换记录
+  TXT     - 文本记录
+  NS      - 名字服务器记录
+  SRV     - 服务记录
+  CAA     - 证书颁发机构授权记录
+
+关键信息：
+  - API Key 可通过 BUNNY_API_KEY 环境变量设置
+  - 推荐安装 jq 以获得更好的 JSON 解析体验
+  - 所有 Zone ID 和记录 ID 都可从列表输出中获取
+
+API 文档：
+  https://docs.bunny.net/api-reference/core/dns-zone/list-dns-zones
+
+EOF
+}
+
+# ==========================
 # 主菜单
+# ==========================
 while true; do
     echo
-    echo "=== Bunny DNS 管理菜单 ==="
+    echo "╔════════════════════════════════════╗"
+    echo "║    Bunny DNS 管理系统              ║"
+    echo "╚════════════════════════════════════╝"
+    echo
     echo "1. 查看 DNS 区域并管理记录"
     echo "2. 添加 DNS 区域"
     echo "3. 删除 DNS 区域"
@@ -278,19 +432,22 @@ while true; do
     echo "5. 单独添加记录"
     echo "6. 单独更新记录"
     echo "7. 单独删除记录"
+    echo "h. 帮助信息"
     echo "0. 退出"
-    read -p "请选择操作: " choice
+    echo
+    read -p "请选择操作 [0-7,h]: " choice
     choice=$(echo "$choice" | tr -d '\r' | xargs)
 
     case "$choice" in
         1) list_zones; zone_menu ;;
         2) add_zone ;;
         3) delete_zone ;;
-        4) read -p "请输入 Zone ID: " zid; zid=$(echo "$zid" | tr -d '\r' | xargs); list_records "$zid" ;;
-        5) read -p "请输入 Zone ID: " zid; zid=$(echo "$zid" | tr -d '\r' | xargs); add_record "$zid" ;;
-        6) read -p "请输入 Zone ID: " zid; zid=$(echo "$zid" | tr -d '\r' | xargs); update_record "$zid" ;;
-        7) read -p "请输入 Zone ID: " zid; zid=$(echo "$zid" | tr -d '\r' | xargs); delete_record "$zid" ;;
-        0) echo "退出程序"; exit 0 ;;
-        *) echo "❌ 无效输入" ;;
+        4) read -p "请输入 Zone ID: " zid; zid=$(echo "$zid" | tr -d '\r' | xargs); [[ -n "$zid" ]] && list_records "$zid" ;;
+        5) read -p "请输入 Zone ID: " zid; zid=$(echo "$zid" | tr -d '\r' | xargs); [[ -n "$zid" ]] && add_record "$zid" ;;
+        6) read -p "请输入 Zone ID: " zid; zid=$(echo "$zid" | tr -d '\r' | xargs); [[ -n "$zid" ]] && update_record "$zid" ;;
+        7) read -p "请输入 Zone ID: " zid; zid=$(echo "$zid" | tr -d '\r' | xargs); [[ -n "$zid" ]] && delete_record "$zid" ;;
+        h) show_help ;;
+        0) echo "👋 感谢使用！再见"; exit 0 ;;
+        *) echo "❌ 无效输入，请重新选择" ;;
     esac
 done
