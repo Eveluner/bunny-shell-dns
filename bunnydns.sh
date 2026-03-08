@@ -390,12 +390,24 @@ delete_record() {
 
 list_records() {
     local zone_id=$1
+    if [[ -z "$zone_id" ]]; then
+        echo "❌ Zone ID 不能为空"
+        return 1
+    fi
+    
+    echo "正在获取 Zone $zone_id 的记录..."
     local resp=$(api_request GET "/dnszone/$zone_id")
     local status=$(echo "$resp" | tail -n1 | tr -d '\r')
     local body=$(echo "$resp" | sed '$d' | tr -d '\r')
 
     if [[ ! "$status" =~ ^(200|201)$ ]]; then
-        check_api_response "$resp" || return
+        check_api_response "$resp"
+        return 1
+    fi
+
+    if [[ -z "$body" ]] || [[ "$body" == "null" ]] || [[ "$body" == "{}" ]]; then
+        echo "❌ 未找到 Zone $zone_id 的记录或 Zone 不存在"
+        return 1
     fi
 
     echo ""
@@ -403,18 +415,29 @@ list_records() {
     echo "$(printf '%-8s %-5s %-20s %s\n' 'ID' 'Type' 'Name' 'Value | Data')"
     echo "$(printf '%-8s %-5s %-20s %s\n' '----' '----' '----' '----')"
     
+    local record_count=0
     if [[ $USE_JQ -eq 1 ]]; then
         echo "$body" | jq -r '.Records[]? // .[]? | select(type=="object") | "\(.Id) \(.Type) \(.Name // "@") \(.Value // .Data // "")"' 2>/dev/null | while read -r id type name value; do
             printf '%-8s %-5s %-20s %s\n' "$id" "$type" "$name" "$value"
-        done || echo "❌ 解析记录失败"
+            ((record_count++))
+        done
+        if [[ $record_count -eq 0 ]]; then
+            echo "❌ 该 Zone 没有 DNS 记录"
+        fi
     else
         echo "$body" | tr '{' '\n' | while read -r line; do
             rid=$(echo "$line" | grep -o "\"Id\"[[:space:]]*:[^,}]*" | sed 's/"Id"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
             type=$(echo "$line" | grep -o "\"Type\"[[:space:]]*:[^,}]*" | sed 's/"Type"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
             name=$(echo "$line" | grep -o "\"Name\"[[:space:]]*:[^,}]*" | sed 's/"Name"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
             value=$(echo "$line" | grep -o "\"Value\"[[:space:]]*:[^,}]*" | sed 's/"Value"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
-            [[ -n "$rid" && -n "$type" ]] && printf '%-8s %-5s %-20s %s\n' "$rid" "$type" "${name:-@}" "$value"
+            if [[ -n "$rid" && -n "$type" ]]; then
+                printf '%-8s %-5s %-20s %s\n' "$rid" "$type" "${name:-@}" "$value"
+                ((record_count++))
+            fi
         done
+        if [[ $record_count -eq 0 ]]; then
+            echo "❌ 该 Zone 没有 DNS 记录"
+        fi
     fi
 }
 
@@ -519,10 +542,42 @@ while true; do
         1) list_zones; zone_menu ;;
         2) add_zone ;;
         3) delete_zone ;;
-        4) read -p "请输入 Zone ID: " zid; zid=$(echo "$zid" | tr -d '\r' | xargs); [[ -n "$zid" ]] && list_records "$zid" ;;
-        5) read -p "请输入 Zone ID: " zid; zid=$(echo "$zid" | tr -d '\r' | xargs); [[ -n "$zid" ]] && add_record "$zid" ;;
-        6) read -p "请输入 Zone ID: " zid; zid=$(echo "$zid" | tr -d '\r' | xargs); [[ -n "$zid" ]] && update_record "$zid" ;;
-        7) read -p "请输入 Zone ID: " zid; zid=$(echo "$zid" | tr -d '\r' | xargs); [[ -n "$zid" ]] && delete_record "$zid" ;;
+        4) 
+            read -p "请输入 Zone ID: " zid
+            zid=$(echo "$zid" | tr -d '\r' | xargs)
+            if [[ -z "$zid" ]]; then
+                echo "❌ Zone ID 不能为空"
+            else
+                list_records "$zid"
+            fi
+            ;;
+        5) 
+            read -p "请输入 Zone ID: " zid
+            zid=$(echo "$zid" | tr -d '\r' | xargs)
+            if [[ -z "$zid" ]]; then
+                echo "❌ Zone ID 不能为空"
+            else
+                add_record "$zid"
+            fi
+            ;;
+        6) 
+            read -p "请输入 Zone ID: " zid
+            zid=$(echo "$zid" | tr -d '\r' | xargs)
+            if [[ -z "$zid" ]]; then
+                echo "❌ Zone ID 不能为空"
+            else
+                update_record "$zid"
+            fi
+            ;;
+        7) 
+            read -p "请输入 Zone ID: " zid
+            zid=$(echo "$zid" | tr -d '\r' | xargs)
+            if [[ -z "$zid" ]]; then
+                echo "❌ Zone ID 不能为空"
+            else
+                delete_record "$zid"
+            fi
+            ;;
         h) show_help ;;
         0) echo "👋 感谢使用！再见"; exit 0 ;;
         *) echo "❌ 无效输入，请重新选择" ;;
