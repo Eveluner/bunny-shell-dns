@@ -337,81 +337,136 @@ update_record() {
     [[ -z "$zone_id" ]] && echo "❌ Zone ID 缺失" && return
     
     echo
-    echo "=== 更新 DNS 记录 ==="
-    # 提示可选类型方便参考
-    echo "可选类型："
-    echo " 1. A     - IPv4 地址"
-    echo " 2. AAAA  - IPv6 地址"
-    echo " 3. CNAME - 规范名称"
-    echo " 4. MX    - 邮件交换"
-    echo " 5. TXT   - 文本记录"
-    echo " 6. NS    - 名字服务器"
-    echo " 7. SRV   - 服务记录"
-    echo " 8. CAA   - 证书颁发机构"
-    echo
+    echo "=== 修改 DNS 记录 ==="
     read -p "请输入记录 ID: " record_id
     record_id=$(echo "$record_id" | tr -d '\r' | xargs)
     [[ -z "$record_id" ]] && echo "❌ 记录 ID 不能为空" && return
     
-    # 使用菜单选择记录类型
-    type=$(select_dns_type) || return
+    # 获取记录详情
+    echo "正在获取记录详情..."
+    local resp=$(api_request GET "/dnszone/$zone_id/records/$record_id")
+    local status=$(echo "$resp" | tail -n1 | tr -d '\r')
+    local body=$(echo "$resp" | sed '$d' | tr -d '\r')
     
-    read -p "请输入记录名 (@, www, api 等子域): " name
+    if [[ ! "$status" =~ ^(200|201)$ ]]; then
+        check_api_response "$resp"
+        return 1
+    fi
+    
+    if [[ -z "$body" ]] || [[ "$body" == "null" ]] || [[ "$body" == "{}" ]]; then
+        echo "❌ 未找到记录 ID $record_id"
+        return 1
+    fi
+    
+    # 解析记录信息
+    local current_type current_name current_value current_ttl current_priority
+    
+    if [[ $USE_JQ -eq 1 ]]; then
+        current_type=$(echo "$body" | jq -r '.Type // empty' 2>/dev/null)
+        current_name=$(echo "$body" | jq -r '.Name // "@" // empty' 2>/dev/null)
+        current_value=$(echo "$body" | jq -r '.Value // .Data // empty' 2>/dev/null)
+        current_ttl=$(echo "$body" | jq -r '.Ttl // 3600' 2>/dev/null)
+        current_priority=$(echo "$body" | jq -r '.Priority // empty' 2>/dev/null)
+    else
+        current_type=$(echo "$body" | grep -o "\"Type\"[[:space:]]*:[^,}]*" | sed 's/"Type"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
+        current_name=$(echo "$body" | grep -o "\"Name\"[[:space:]]*:[^,}]*" | sed 's/"Name"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//' | sed 's/^null$/@/')
+        current_value=$(echo "$body" | grep -o "\"Value\"[[:space:]]*:[^,}]*" | sed 's/"Value"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//' || echo "$body" | grep -o "\"Data\"[[:space:]]*:[^,}]*" | sed 's/"Data"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
+        current_ttl=$(echo "$body" | grep -o "\"Ttl\"[[:space:]]*:[^,}]*" | sed 's/"Ttl"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//' | sed 's/^null$/3600/')
+        current_priority=$(echo "$body" | grep -o "\"Priority\"[[:space:]]*:[^,}]*" | sed 's/"Priority"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
+    fi
+    
+    # 类型反向映射
+    declare -A type_reverse_map=([0]="A" [1]="AAAA" [2]="CNAME" [3]="TXT" [4]="MX" [8]="SRV" [9]="CAA" [12]="NS")
+    local type=${type_reverse_map[$current_type]}
+    
+    if [[ -z "$type" ]]; then
+        echo "❌ 不支持的记录类型: $current_type"
+        return 1
+    fi
+    
+    # 显示当前记录信息
+    echo
+    echo "=== 当前记录信息 ==="
+    echo "记录 ID: $record_id"
+    echo "类型: $type"
+    echo "名称: ${current_name:-@}"
+    echo "值: $current_value"
+    echo "TTL: $current_ttl"
+    [[ -n "$current_priority" ]] && echo "优先级: $current_priority"
+    echo
+    
+    # 根据记录类型提供修改界面
+    echo "=== 修改记录 (留空保持不变) ==="
+    
+    # 修改记录名
+    read -p "记录名 (${current_name:-@}): " name
     name=$(echo "$name" | tr -d '\r' | xargs)
+    name=${name:-$current_name}
+    [[ -z "$name" ]] && name="@"
     is_valid_name "$name" || return
     
-    # 根据记录类型，提供相应的提示和验证
+    # 根据记录类型修改值
     case "$type" in
         A)
-            read -p "请输入 IPv4 地址 (如 192.0.2.1): " value
+            read -p "IPv4 地址 ($current_value): " value
             value=$(echo "$value" | tr -d '\r' | xargs)
+            value=${value:-$current_value}
             is_valid_ipv4 "$value" || return
             ;;
         AAAA)
-            read -p "请输入 IPv6 地址: " value
+            read -p "IPv6 地址 ($current_value): " value
             value=$(echo "$value" | tr -d '\r' | xargs)
+            value=${value:-$current_value}
             is_valid_ipv6 "$value" || return
             ;;
         CNAME|MX|NS)
-            read -p "请输入记录值 (完整域名，如 example.com): " value
+            read -p "记录值 ($current_value): " value
             value=$(echo "$value" | tr -d '\r' | xargs)
+            value=${value:-$current_value}
             is_valid_domain "$value" || return
             ;;
         TXT)
-            read -p "请输入 TXT 记录值: " value
+            read -p "TXT 记录值 ($current_value): " value
             value=$(echo "$value" | tr -d '\r' | xargs)
+            value=${value:-$current_value}
             [[ -z "$value" ]] && echo "❌ 记录值不能为空" && return
             ;;
         SRV|CAA)
-            read -p "请输入记录值: " value
+            read -p "记录值 ($current_value): " value
             value=$(echo "$value" | tr -d '\r' | xargs)
+            value=${value:-$current_value}
             [[ -z "$value" ]] && echo "❌ 记录值不能为空" && return
             ;;
         *)
-            echo "❌ 不支持的记录类型"
+            echo "❌ 不支持的记录类型: $type"
             return 1
             ;;
     esac
     
-    read -p "请输入 TTL (默认 3600): " ttl
-    ttl=${ttl:-3600}
+    # 修改 TTL
+    read -p "TTL ($current_ttl): " ttl
+    ttl=$(echo "$ttl" | tr -d '\r' | xargs)
+    ttl=${ttl:-$current_ttl}
     [[ ! "$ttl" =~ ^[0-9]+$ ]] && echo "❌ TTL 必须是数字" && return
-
+    
     # 记录类型映射
     declare -A type_map=([A]=0 [AAAA]=1 [CNAME]=2 [MX]=4 [TXT]=3 [NS]=12 [SRV]=8 [CAA]=9)
     type_num=${type_map[$type]}
-
+    
     # MX 记录需要优先级
+    local data
     if [[ "$type" == "MX" ]]; then
-        read -p "请输入 MX 优先级 (默认 10): " priority
-        priority=${priority:-10}
+        local priority=${current_priority:-10}
+        read -p "MX 优先级 ($priority): " new_priority
+        new_priority=$(echo "$new_priority" | tr -d '\r' | xargs)
+        priority=${new_priority:-$priority}
         [[ ! "$priority" =~ ^[0-9]+$ ]] && echo "❌ 优先级必须是数字" && return
         data="{\"Type\":$type_num,\"Name\":\"$name\",\"Value\":\"$value\",\"Ttl\":$ttl,\"Priority\":$priority}"
     else
         data="{\"Type\":$type_num,\"Name\":\"$name\",\"Value\":\"$value\",\"Ttl\":$ttl}"
     fi
-
-    echo "正在更新 $type 记录..."
+    
+    echo "正在修改 $type 记录..."
     resp=$(api_request POST "/dnszone/$zone_id/records/$record_id" "$data")
     check_api_response "$resp"
 }
@@ -506,7 +561,7 @@ zone_menu() {
         echo "=== Zone $zone_id 管理菜单 ==="
         echo "1. 查看记录"
         echo "2. 添加记录"
-        echo "3. 更新记录"
+        echo "3. 修改记录"
         echo "4. 删除记录"
         echo "0. 返回主菜单"
         read -p "请选择操作: " choice
@@ -538,7 +593,7 @@ show_help() {
   3. 删除 DNS 区域         - 删除指定的 DNS 区域及其所有记录
   4. 单独查看记录          - 直接查看特定 Zone ID 的所有记录
   5. 单独添加记录          - 直接向特定 Zone ID 添加记录
-  6. 单独更新记录          - 直接修改特定 Zone ID 中的记录
+  6. 单独修改记录          - 直接修改特定 Zone ID 中的记录
   7. 单独删除记录          - 直接删除特定 Zone ID 中的记录
   h. 显示此帮助            - 显示帮助信息
   0. 退出                 - 退出程序
@@ -578,7 +633,7 @@ while true; do
     echo "3. 删除 DNS 区域"
     echo "4. 单独查看记录"
     echo "5. 单独添加记录"
-    echo "6. 单独更新记录"
+    echo "6. 单独修改记录"
     echo "7. 单独删除记录"
     echo "h. 帮助信息"
     echo "0. 退出"
