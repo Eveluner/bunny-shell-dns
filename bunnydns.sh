@@ -112,9 +112,11 @@ is_valid_ipv6() {
 
 is_valid_name() {
     local name=$(echo "$1" | tr -d '\r' | xargs)
+    # 记录名不能为空
     [[ -z "$name" ]] && { echo "❌ 记录名不能为空"; return 1; }
-    # 记录名不能包含点号（.），只能是子域或 @
-    [[ "$name" =~ ^[a-zA-Z0-9\-\_@\*]+$ ]] || { echo "❌ 记录名只能包含字母、数字、-、_、@ 或 *（不能包含点号 .）"; return 1; }
+    # 记录名只能包含字母、数字、-、_、@ 或 *（不能包含点号 .）
+    # 这里不要给字符类中的符号加反斜杠，反而会让模式失效
+    [[ "$name" =~ ^[a-zA-Z0-9@*_\-]+$ ]] || { echo "❌ 记录名只能包含字母、数字、-、_、@ 或 *（不能包含点号 .）"; return 1; }
     return 0
 }
 
@@ -130,30 +132,36 @@ is_valid_domain() {
 # DNS 记录类型选择菜单
 # ==========================
 select_dns_type() {
-    echo "请选择记录类型:"
-    echo "  1. A       - IPv4 地址"
-    echo "  2. AAAA    - IPv6 地址"
-    echo "  3. CNAME   - 规范名称"
-    echo "  4. MX      - 邮件交换"
-    echo "  5. TXT     - 文本记录"
-    echo "  6. NS      - 名字服务器"
-    echo "  7. SRV     - 服务记录"
-    echo "  8. CAA     - 证书颁发机构"
-    echo
-    read -p "请输入选择 (1-8): " choice
-    choice=$(echo "$choice" | tr -d '\r' | xargs)
-    
+    # 持续显示菜单直到用户输入有效选项或手动取消
     declare -A type_menu=(
         [1]="A" [2]="AAAA" [3]="CNAME" [4]="MX"
         [5]="TXT" [6]="NS" [7]="SRV" [8]="CAA"
     )
-    
-    if [[ -n "${type_menu[$choice]}" ]]; then
-        echo "${type_menu[$choice]}"
-    else
-        echo "❌ 无效的选择，请输入 1-8"
-        return 1
-    fi
+
+    while true; do
+        echo "请选择记录类型:" >&2
+        echo "  1. A       - IPv4 地址" >&2
+        echo "  2. AAAA    - IPv6 地址" >&2
+        echo "  3. CNAME   - 规范名称" >&2
+        echo "  4. MX      - 邮件交换" >&2
+        echo "  5. TXT     - 文本记录" >&2
+        echo "  6. NS      - 名字服务器" >&2
+        echo "  7. SRV     - 服务记录" >&2
+        echo "  8. CAA     - 证书颁发机构" >&2
+        echo >&2
+        read -p "请输入选择 (1-8，q 取消): " choice
+        choice=$(echo "$choice" | tr -d '\r' | xargs)
+
+        [[ "$choice" == "q" || "$choice" == "Q" ]] && return 1
+
+        if [[ -n "${type_menu[$choice]}" ]]; then
+            echo "${type_menu[$choice]}"
+            return 0
+        fi
+
+        echo "❌ 无效的选择，请输入 1-8" >&2
+        # 循环继续，会重新显示菜单
+    done
 }
 # ...existing code...
 
@@ -257,7 +265,17 @@ add_record() {
     
     echo
     echo "=== 添加 DNS 记录 ==="
-    
+    # 直接列出类型选项供参考（重复一遍以防看不见菜单）
+    echo "可选类型："
+    echo " 1. A     - IPv4 地址"
+    echo " 2. AAAA  - IPv6 地址"
+    echo " 3. CNAME - 规范名称"
+    echo " 4. MX    - 邮件交换"
+    echo " 5. TXT   - 文本记录"
+    echo " 6. NS    - 名字服务器"
+    echo " 7. SRV   - 服务记录"
+    echo " 8. CAA   - 证书颁发机构"
+    echo
     # 使用菜单选择记录类型
     type=$(select_dns_type) || return
     
@@ -303,7 +321,7 @@ add_record() {
     [[ ! "$ttl" =~ ^[0-9]+$ ]] && echo "❌ TTL 必须是数字" && return
 
     # 记录类型映射
-    declare -A type_map=([A]=1 [AAAA]=28 [CNAME]=5 [MX]=15 [TXT]=16 [NS]=2 [SRV]=33 [CAA]=257)
+    declare -A type_map=([A]=0 [AAAA]=1 [CNAME]=2 [MX]=4 [TXT]=3 [NS]=12 [SRV]=8 [CAA]=9)
     type_num=${type_map[$type]}
 
     # MX 记录需要优先级
@@ -327,6 +345,17 @@ update_record() {
     
     echo
     echo "=== 更新 DNS 记录 ==="
+    # 提示可选类型方便参考
+    echo "可选类型："
+    echo " 1. A     - IPv4 地址"
+    echo " 2. AAAA  - IPv6 地址"
+    echo " 3. CNAME - 规范名称"
+    echo " 4. MX    - 邮件交换"
+    echo " 5. TXT   - 文本记录"
+    echo " 6. NS    - 名字服务器"
+    echo " 7. SRV   - 服务记录"
+    echo " 8. CAA   - 证书颁发机构"
+    echo
     read -p "请输入记录 ID: " record_id
     record_id=$(echo "$record_id" | tr -d '\r' | xargs)
     [[ -z "$record_id" ]] && echo "❌ 记录 ID 不能为空" && return
@@ -376,7 +405,7 @@ update_record() {
     [[ ! "$ttl" =~ ^[0-9]+$ ]] && echo "❌ TTL 必须是数字" && return
 
     # 记录类型映射
-    declare -A type_map=([A]=1 [AAAA]=28 [CNAME]=5 [MX]=15 [TXT]=16 [NS]=2 [SRV]=33 [CAA]=257)
+    declare -A type_map=([A]=0 [AAAA]=1 [CNAME]=2 [MX]=4 [TXT]=3 [NS]=12 [SRV]=8 [CAA]=9)
     type_num=${type_map[$type]}
 
     # MX 记录需要优先级
@@ -437,28 +466,32 @@ list_records() {
     echo "$(printf '%-8s %-5s %-20s %s\n' 'ID' 'Type' 'Name' 'Value | Data')"
     echo "$(printf '%-8s %-5s %-20s %s\n' '----' '----' '----' '----')"
     
-    local record_count=0
+    # 使用局部变量避免管道子进程导致计数失效
     if [[ $USE_JQ -eq 1 ]]; then
-        echo "$body" | jq -r '.Records[]? // .[]? | select(type=="object") | "\(.Id) \(.Type) \(.Name // "@") \(.Value // .Data // "")"' 2>/dev/null | while read -r id type name value; do
-            printf '%-8s %-5s %-20s %s\n' "$id" "$type" "$name" "$value"
-            ((record_count++))
-        done
-        if [[ $record_count -eq 0 ]]; then
+        local records
+        records=$(echo "$body" | jq -r '.Records[]? // .[]? | select(type=="object") | "\(.Id) \(.Type) \(.Name // "@") \(.Value // .Data // "")"' 2>/dev/null)
+        if [[ -z "$records" ]]; then
             echo "❌ 该 Zone 没有 DNS 记录"
+        else
+            echo "$records" | while read -r id type name value; do
+                printf '%-8s %-5s %-20s %s\n' "$id" "$type" "$name" "$value"
+            done
         fi
     else
-        echo "$body" | tr '{' '\n' | while read -r line; do
+        local records
+        records=$(echo "$body" | tr '{' '\n' | while read -r line; do
             rid=$(echo "$line" | grep -o "\"Id\"[[:space:]]*:[^,}]*" | sed 's/"Id"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
             type=$(echo "$line" | grep -o "\"Type\"[[:space:]]*:[^,}]*" | sed 's/"Type"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
             name=$(echo "$line" | grep -o "\"Name\"[[:space:]]*:[^,}]*" | sed 's/"Name"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
             value=$(echo "$line" | grep -o "\"Value\"[[:space:]]*:[^,}]*" | sed 's/"Value"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
             if [[ -n "$rid" && -n "$type" ]]; then
                 printf '%-8s %-5s %-20s %s\n' "$rid" "$type" "${name:-@}" "$value"
-                ((record_count++))
             fi
-        done
-        if [[ $record_count -eq 0 ]]; then
+        done)
+        if [[ -z "$records" ]]; then
             echo "❌ 该 Zone 没有 DNS 记录"
+        else
+            echo "$records"
         fi
     fi
 }
