@@ -169,7 +169,7 @@ list_zones() {
         check_api_response "$resp" || return
     fi
 
-    if [[ -z "$body" ]] || [[ "$body" == "[]" ]]; then
+    if [[ -z "$body" ]] || [[ "$body" == "null" ]] || [[ "$body" == "{}" ]] || [[ "$body" == '{"Items":[]}' ]]; then
         echo "❌ 没有找到任何 DNS 区域"
         return
     fi
@@ -179,16 +179,38 @@ list_zones() {
     echo "$(printf '%-30s %s\n' '-----' '-----')"
     
     if [[ $USE_JQ -eq 1 ]]; then
-        echo "$body" | jq -r '.[] | "\(.Domain | ascii_downcase) \(.Id)"' 2>/dev/null | while read -r domain id; do
-            printf '%-30s %s\n' "$domain" "$id"
-        done || echo "❌ 解析结果失败"
+        # 尝试使用 jq 解析
+        if echo "$body" | jq -r '.Items[]? | "\(.Domain | ascii_downcase) \(.Id)"' 2>/dev/null | grep -q .; then
+            # jq 解析成功，重新执行并输出
+            echo "$body" | jq -r '.Items[]? | "\(.Domain | ascii_downcase) \(.Id)"' 2>/dev/null | while read -r domain id; do
+                printf '%-30s %s\n' "$domain" "$id"
+            done
+        else
+            # jq 解析失败，回退到正则解析
+            echo "⚠️ jq 解析失败，使用兼容模式..."
+            local parsed_data=$(echo "$body" | grep -o '"Items":[^}]*' | sed 's/"Items"://' | tr '[' '\n' | tr '{' '\n')
+            if [[ -n "$parsed_data" ]]; then
+                echo "$parsed_data" | while read -r line; do
+                    id=$(echo "$line" | grep -o "\"Id\"[[:space:]]*:[^,}]*" | sed 's/"Id"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
+                    domain=$(echo "$line" | grep -o "\"Domain\"[[:space:]]*:[^,}]*" | sed 's/"Domain"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
+                    [[ -n "$id" && -n "$domain" ]] && printf '%-30s %s\n' "${domain,,}" "$id"
+                done
+            else
+                echo "❌ 解析区域列表失败"
+            fi
+        fi
     else
-        # 兼容旧解析方式
-        echo "$body" | tr '{' '\n' | while read -r line; do
-            id=$(echo "$line" | grep -o "\"Id\"[[:space:]]*:[^,}]*" | sed 's/"Id"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
-            domain=$(echo "$line" | grep -o "\"Domain\"[[:space:]]*:[^,}]*" | sed 's/"Domain"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
-            [[ -n "$id" && -n "$domain" ]] && printf '%-30s %s\n' "${domain,,}" "$id"
-        done
+        # 不使用 jq，直接使用正则解析
+        local parsed_data=$(echo "$body" | grep -o '"Items":[^}]*' | sed 's/"Items"://' | tr '[' '\n' | tr '{' '\n')
+        if [[ -n "$parsed_data" ]]; then
+            echo "$parsed_data" | while read -r line; do
+                id=$(echo "$line" | grep -o "\"Id\"[[:space:]]*:[^,}]*" | sed 's/"Id"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
+                domain=$(echo "$line" | grep -o "\"Domain\"[[:space:]]*:[^,}]*" | sed 's/"Domain"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
+                [[ -n "$id" && -n "$domain" ]] && printf '%-30s %s\n' "${domain,,}" "$id"
+            done
+        else
+            echo "❌ 解析区域列表失败"
+        fi
     fi
 }
 
