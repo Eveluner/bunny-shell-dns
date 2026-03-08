@@ -342,9 +342,9 @@ update_record() {
     record_id=$(echo "$record_id" | tr -d '\r' | xargs)
     [[ -z "$record_id" ]] && echo "❌ 记录 ID 不能为空" && return
     
-    # 获取记录详情
+    # 获取区域记录详情（包含所有记录）
     echo "正在获取记录详情..."
-    local resp=$(api_request GET "/dnszone/$zone_id/records/$record_id")
+    local resp=$(api_request GET "/dnszone/$zone_id")
     local status=$(echo "$resp" | tail -n1 | tr -d '\r')
     local body=$(echo "$resp" | sed '$d' | tr -d '\r')
     
@@ -354,6 +354,26 @@ update_record() {
     fi
     
     if [[ -z "$body" ]] || [[ "$body" == "null" ]] || [[ "$body" == "{}" ]]; then
+        echo "❌ 未找到 Zone $zone_id 或该区域没有记录"
+        return 1
+    fi
+    
+    # 从区域记录中查找指定的记录ID
+    local record_found=""
+    if [[ $USE_JQ -eq 1 ]]; then
+        record_found=$(echo "$body" | jq -r --arg rid "$record_id" '.Records[]? | select(.Id == ($rid | tonumber)) | @json' 2>/dev/null)
+    else
+        # 使用正则表达式查找记录 - 遍历所有记录对象
+        record_found=$(echo "$body" | grep -o '"Records"[^}]*' | sed 's/"Records"://' | tr '[' '\n' | tr '{' '\n' | while read -r line; do
+            if echo "$line" | grep -q "\"Id\"[[:space:]]*:[[:space:]]*$record_id"; then
+                # 找到匹配的记录，提取完整的记录对象
+                echo "$line"
+                break
+            fi
+        done)
+    fi
+    
+    if [[ -z "$record_found" ]]; then
         echo "❌ 未找到记录 ID $record_id"
         return 1
     fi
@@ -362,17 +382,19 @@ update_record() {
     local current_type current_name current_value current_ttl current_priority
     
     if [[ $USE_JQ -eq 1 ]]; then
-        current_type=$(echo "$body" | jq -r '.Type // empty' 2>/dev/null)
-        current_name=$(echo "$body" | jq -r '.Name // "@" // empty' 2>/dev/null)
-        current_value=$(echo "$body" | jq -r '.Value // .Data // empty' 2>/dev/null)
-        current_ttl=$(echo "$body" | jq -r '.Ttl // 3600' 2>/dev/null)
-        current_priority=$(echo "$body" | jq -r '.Priority // empty' 2>/dev/null)
+        # record_found 是 JSON 字符串，直接解析
+        current_type=$(echo "$record_found" | jq -r '.Type // empty' 2>/dev/null)
+        current_name=$(echo "$record_found" | jq -r '.Name // "@" // empty' 2>/dev/null)
+        current_value=$(echo "$record_found" | jq -r '.Value // .Data // empty' 2>/dev/null)
+        current_ttl=$(echo "$record_found" | jq -r '.Ttl // 3600' 2>/dev/null)
+        current_priority=$(echo "$record_found" | jq -r '.Priority // empty' 2>/dev/null)
     else
-        current_type=$(echo "$body" | grep -o "\"Type\"[[:space:]]*:[^,}]*" | sed 's/"Type"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
-        current_name=$(echo "$body" | grep -o "\"Name\"[[:space:]]*:[^,}]*" | sed 's/"Name"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//' | sed 's/^null$/@/')
-        current_value=$(echo "$body" | grep -o "\"Value\"[[:space:]]*:[^,}]*" | sed 's/"Value"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//' || echo "$body" | grep -o "\"Data\"[[:space:]]*:[^,}]*" | sed 's/"Data"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
-        current_ttl=$(echo "$body" | grep -o "\"Ttl\"[[:space:]]*:[^,}]*" | sed 's/"Ttl"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//' | sed 's/^null$/3600/')
-        current_priority=$(echo "$body" | grep -o "\"Priority\"[[:space:]]*:[^,}]*" | sed 's/"Priority"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
+        # record_found 是记录行，解析各个字段
+        current_type=$(echo "$record_found" | grep -o "\"Type\"[[:space:]]*:[^,}]*" | sed 's/"Type"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
+        current_name=$(echo "$record_found" | grep -o "\"Name\"[[:space:]]*:[^,}]*" | sed 's/"Name"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//' | sed 's/^null$/@/')
+        current_value=$(echo "$record_found" | grep -o "\"Value\"[[:space:]]*:[^,}]*" | sed 's/"Value"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//' || echo "$record_found" | grep -o "\"Data\"[[:space:]]*:[^,}]*" | sed 's/"Data"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
+        current_ttl=$(echo "$record_found" | grep -o "\"Ttl\"[[:space:]]*:[^,}]*" | sed 's/"Ttl"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//' | sed 's/^null$/3600/')
+        current_priority=$(echo "$record_found" | grep -o "\"Priority\"[[:space:]]*:[^,}]*" | sed 's/"Priority"[[:space:]]*:[[:space:]]*//;s/^\"//;s/\"$//')
     fi
     
     # 类型反向映射
