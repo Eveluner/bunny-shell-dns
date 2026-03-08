@@ -123,8 +123,12 @@ is_valid_name() {
 is_valid_domain() {
     local domain=$(echo "$1" | tr -d '\r' | xargs)
     [[ -z "$domain" ]] && { echo "❌ 值不能为空"; return 1; }
-    # 完整域名验证（用于 CNAME、MX、NS 等）
-    [[ "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]] || { echo "❌ 无效的域名格式"; return 1; }
+    # 基本域名验证：不允许以点号开头或结尾，至少包含一个点号，只允许字母数字点号和连字符
+    [[ "$domain" =~ ^\. ]] && { echo "❌ 域名不能以点号开头"; return 1; }
+    [[ "$domain" =~ \.$ ]] && { echo "❌ 域名不能以点号结尾"; return 1; }
+    [[ "$domain" =~ \.\. ]] && { echo "❌ 域名不能包含连续点号"; return 1; }
+    [[ ! "$domain" =~ \. ]] && { echo "❌ 域名必须包含至少一个点号"; return 1; }
+    [[ "$domain" =~ [^a-zA-Z0-9.-] ]] && { echo "❌ 域名只能包含字母、数字、点号和连字符"; return 1; }
     return 0
 }
 
@@ -265,17 +269,6 @@ add_record() {
     
     echo
     echo "=== 添加 DNS 记录 ==="
-    # 直接列出类型选项供参考（重复一遍以防看不见菜单）
-    echo "可选类型："
-    echo " 1. A     - IPv4 地址"
-    echo " 2. AAAA  - IPv6 地址"
-    echo " 3. CNAME - 规范名称"
-    echo " 4. MX    - 邮件交换"
-    echo " 5. TXT   - 文本记录"
-    echo " 6. NS    - 名字服务器"
-    echo " 7. SRV   - 服务记录"
-    echo " 8. CAA   - 证书颁发机构"
-    echo
     # 使用菜单选择记录类型
     type=$(select_dns_type) || return
     
