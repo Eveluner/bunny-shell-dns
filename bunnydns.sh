@@ -113,16 +113,47 @@ is_valid_ipv6() {
 is_valid_name() {
     local name=$(echo "$1" | tr -d '\r' | xargs)
     [[ -z "$name" ]] && { echo "❌ 记录名不能为空"; return 1; }
-    [[ "$name" =~ ^[a-zA-Z0-9\-\_@\*]+$ ]] || { echo "❌ 记录名只能包含字母、数字、-、_、@ 或 *"; return 1; }
+    # 记录名不能包含点号（.），只能是子域或 @
+    [[ "$name" =~ ^[a-zA-Z0-9\-\_@\*]+$ ]] || { echo "❌ 记录名只能包含字母、数字、-、_、@ 或 *（不能包含点号 .）"; return 1; }
     return 0
 }
 
 is_valid_domain() {
     local domain=$(echo "$1" | tr -d '\r' | xargs)
-    [[ -z "$domain" ]] && { echo "❌ 域名不能为空"; return 1; }
-    # 简单的域名验证
+    [[ -z "$domain" ]] && { echo "❌ 值不能为空"; return 1; }
+    # 完整域名验证（用于 CNAME、MX、NS 等）
     [[ "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]] || { echo "❌ 无效的域名格式"; return 1; }
     return 0
+}
+
+# ==========================
+# DNS 记录类型选择菜单
+# ==========================
+select_dns_type() {
+    echo "请选择记录类型:"
+    echo "  1. A       - IPv4 地址"
+    echo "  2. AAAA    - IPv6 地址"
+    echo "  3. CNAME   - 规范名称"
+    echo "  4. MX      - 邮件交换"
+    echo "  5. TXT     - 文本记录"
+    echo "  6. NS      - 名字服务器"
+    echo "  7. SRV     - 服务记录"
+    echo "  8. CAA     - 证书颁发机构"
+    echo
+    read -p "请输入选择 (1-8): " choice
+    choice=$(echo "$choice" | tr -d '\r' | xargs)
+    
+    declare -A type_menu=(
+        [1]="A" [2]="AAAA" [3]="CNAME" [4]="MX"
+        [5]="TXT" [6]="NS" [7]="SRV" [8]="CAA"
+    )
+    
+    if [[ -n "${type_menu[$choice]}" ]]; then
+        echo "${type_menu[$choice]}"
+    else
+        echo "❌ 无效的选择，请输入 1-8"
+        return 1
+    fi
 }
 # ...existing code...
 
@@ -204,36 +235,56 @@ add_record() {
     
     echo
     echo "=== 添加 DNS 记录 ==="
-    echo "支持的记录类型: A, AAAA, CNAME, MX, TXT, NS, SRV, CAA"
-    read -p "请输入记录类型: " type
-    type=$(echo "$type" | tr '[:lower:]' '[:upper:]')
     
-    read -p "请输入记录名 (@, www 或其他子域): " name
+    # 使用菜单选择记录类型
+    type=$(select_dns_type) || return
+    
+    read -p "请输入记录名 (@, www, api 等子域): " name
     name=$(echo "$name" | tr -d '\r' | xargs)
     is_valid_name "$name" || return
     
-    read -p "请输入记录值: " value
-    value=$(echo "$value" | tr -d '\r' | xargs)
-    [[ -z "$value" ]] && echo "❌ 记录值不能为空" && return
+    # 根据记录类型，提供相应的提示和验证
+    case "$type" in
+        A)
+            read -p "请输入 IPv4 地址 (如 192.0.2.1): " value
+            value=$(echo "$value" | tr -d '\r' | xargs)
+            is_valid_ipv4 "$value" || return
+            ;;
+        AAAA)
+            read -p "请输入 IPv6 地址: " value
+            value=$(echo "$value" | tr -d '\r' | xargs)
+            is_valid_ipv6 "$value" || return
+            ;;
+        CNAME|MX|NS)
+            read -p "请输入记录值 (完整域名，如 example.com): " value
+            value=$(echo "$value" | tr -d '\r' | xargs)
+            is_valid_domain "$value" || return
+            ;;
+        TXT)
+            read -p "请输入 TXT 记录值: " value
+            value=$(echo "$value" | tr -d '\r' | xargs)
+            [[ -z "$value" ]] && echo "❌ 记录值不能为空" && return
+            ;;
+        SRV|CAA)
+            read -p "请输入记录值: " value
+            value=$(echo "$value" | tr -d '\r' | xargs)
+            [[ -z "$value" ]] && echo "❌ 记录值不能为空" && return
+            ;;
+        *)
+            echo "❌ 不支持的记录类型"
+            return 1
+            ;;
+    esac
     
     read -p "请输入 TTL (默认 3600): " ttl
     ttl=${ttl:-3600}
-    
-    # 验证 TTL 是否为数字
     [[ ! "$ttl" =~ ^[0-9]+$ ]] && echo "❌ TTL 必须是数字" && return
 
-    declare -A type_map=([A]=1 [AAAA]=28 [CNAME]=5 [MX]=15 [TXT]=16 [NS]=2 [SRV]=33 [CAA]=257 [REDIRECT]=301)
+    # 记录类型映射
+    declare -A type_map=([A]=1 [AAAA]=28 [CNAME]=5 [MX]=15 [TXT]=16 [NS]=2 [SRV]=33 [CAA]=257)
     type_num=${type_map[$type]}
-    [[ -z "$type_num" ]] && { echo "❌ 类型无效"; return; }
 
-    # IP 地址验证
-    if [[ "$type" == "A" ]]; then
-        is_valid_ipv4 "$value" || { echo "❌ IPv4 地址不合法"; return; }
-    elif [[ "$type" == "AAAA" ]]; then
-        is_valid_ipv6 "$value" || { echo "❌ IPv6 地址不合法"; return; }
-    fi
-
-    # 特殊字段（如 MX 的优先级）
+    # MX 记录需要优先级
     if [[ "$type" == "MX" ]]; then
         read -p "请输入 MX 优先级 (默认 10): " priority
         priority=${priority:-10}
@@ -243,7 +294,7 @@ add_record() {
         data="{\"Type\":$type_num,\"Name\":\"$name\",\"Value\":\"$value\",\"Ttl\":$ttl}"
     fi
 
-    echo "正在添加记录..."
+    echo "正在添加 $type 记录..."
     resp=$(api_request PUT "/dnszone/$zone_id/records" "$data")
     check_api_response "$resp"
 }
@@ -258,29 +309,55 @@ update_record() {
     record_id=$(echo "$record_id" | tr -d '\r' | xargs)
     [[ -z "$record_id" ]] && echo "❌ 记录 ID 不能为空" && return
     
-    read -p "请输入记录类型: " type
-    type=$(echo "$type" | tr '[:lower:]' '[:upper:]')
-    read -p "请输入记录名 (@, www 或其他子域): " name
+    # 使用菜单选择记录类型
+    type=$(select_dns_type) || return
+    
+    read -p "请输入记录名 (@, www, api 等子域): " name
     name=$(echo "$name" | tr -d '\r' | xargs)
     is_valid_name "$name" || return
-    read -p "请输入新的记录值: " value
-    value=$(echo "$value" | tr -d '\r' | xargs)
-    [[ -z "$value" ]] && echo "❌ 记录值不能为空" && return
+    
+    # 根据记录类型，提供相应的提示和验证
+    case "$type" in
+        A)
+            read -p "请输入 IPv4 地址 (如 192.0.2.1): " value
+            value=$(echo "$value" | tr -d '\r' | xargs)
+            is_valid_ipv4 "$value" || return
+            ;;
+        AAAA)
+            read -p "请输入 IPv6 地址: " value
+            value=$(echo "$value" | tr -d '\r' | xargs)
+            is_valid_ipv6 "$value" || return
+            ;;
+        CNAME|MX|NS)
+            read -p "请输入记录值 (完整域名，如 example.com): " value
+            value=$(echo "$value" | tr -d '\r' | xargs)
+            is_valid_domain "$value" || return
+            ;;
+        TXT)
+            read -p "请输入 TXT 记录值: " value
+            value=$(echo "$value" | tr -d '\r' | xargs)
+            [[ -z "$value" ]] && echo "❌ 记录值不能为空" && return
+            ;;
+        SRV|CAA)
+            read -p "请输入记录值: " value
+            value=$(echo "$value" | tr -d '\r' | xargs)
+            [[ -z "$value" ]] && echo "❌ 记录值不能为空" && return
+            ;;
+        *)
+            echo "❌ 不支持的记录类型"
+            return 1
+            ;;
+    esac
     
     read -p "请输入 TTL (默认 3600): " ttl
     ttl=${ttl:-3600}
     [[ ! "$ttl" =~ ^[0-9]+$ ]] && echo "❌ TTL 必须是数字" && return
 
-    declare -A type_map=([A]=1 [AAAA]=28 [CNAME]=5 [MX]=15 [TXT]=16 [NS]=2 [SRV]=33 [CAA]=257 [REDIRECT]=301)
+    # 记录类型映射
+    declare -A type_map=([A]=1 [AAAA]=28 [CNAME]=5 [MX]=15 [TXT]=16 [NS]=2 [SRV]=33 [CAA]=257)
     type_num=${type_map[$type]}
-    [[ -z "$type_num" ]] && { echo "❌ 类型无效"; return; }
 
-    if [[ "$type" == "A" ]]; then
-        is_valid_ipv4 "$value" || { echo "❌ IPv4 地址不合法"; return; }
-    elif [[ "$type" == "AAAA" ]]; then
-        is_valid_ipv6 "$value" || { echo "❌ IPv6 地址不合法"; return; }
-    fi
-
+    # MX 记录需要优先级
     if [[ "$type" == "MX" ]]; then
         read -p "请输入 MX 优先级 (默认 10): " priority
         priority=${priority:-10}
@@ -290,7 +367,7 @@ update_record() {
         data="{\"Type\":$type_num,\"Name\":\"$name\",\"Value\":\"$value\",\"Ttl\":$ttl}"
     fi
 
-    echo "正在更新记录..."
+    echo "正在更新 $type 记录..."
     resp=$(api_request POST "/dnszone/$zone_id/records/$record_id" "$data")
     check_api_response "$resp"
 }
